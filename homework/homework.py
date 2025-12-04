@@ -96,3 +96,143 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import os 
+from sklearn.compose import ColumnTransformer
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import SVC
+from sklearn.metrics import (precision_score, balanced_accuracy_score,
+                              recall_score, f1_score)
+from sklearn.metrics import confusion_matrix
+import gzip
+import pickle
+import os
+import json
+
+def cargar_datos():
+
+    df_train = pd.read_csv("files/input/train_data.csv.zip")
+    df_test = pd.read_csv("files/input/test_data.csv.zip")
+    return df_train, df_test
+
+def limpieza(df):
+    df = df.copy()
+    df = df.rename(columns = {"default payment next month":"default"})
+    df = df.drop(columns = ["ID"], errors = "ignore")
+    df = df.dropna()
+    df = df[(df["EDUCATION"] > 0) & (df["MARRIAGE"] > 0)]
+    df.loc[df["EDUCATION"] >= 4, "EDUCATION"] = 4
+    
+    return df
+
+def separar_datos(base):
+    base = base.copy()
+    x = base
+    y = base.pop("default")
+    return x,y
+
+def hacer_pipeline(estimador):
+    columnas_categoricas = ["SEX","EDUCATION","MARRIAGE"]
+
+    preproceso = ColumnTransformer(
+        transformers = [
+            ("ohe",
+             OneHotEncoder(handle_unknown = "ignore"),
+             columnas_categoricas),
+        ],
+        remainder = StandardScaler()
+    )
+
+    pipeline = Pipeline([
+        ("preprocessor", preproceso),
+        ("feature_selection", SelectKBest(score_func=f_classif)),
+        ("pca", PCA()),
+        ("classifier", MLPClassifier(max_iter=15000, random_state=17))
+    ])
+
+    return pipeline
+
+def optimizar_modelo(pipeline, x_train, y_train):
+    parametros = {
+        'pca__n_components': [None],
+        'feature_selection__k': [20],
+        'classifier__hidden_layer_sizes': [(50, 30, 40, 60)],
+        'classifier__alpha': [0.26],
+        'classifier__learning_rate_init': [0.001]
+    }
+
+    grid_search = GridSearchCV(
+        estimator = pipeline,
+        param_grid = parametros,
+        scoring = "balanced_accuracy",
+        cv = 10,
+        n_jobs = -1,
+        verbose = 1
+    )
+
+    grid_search.fit(x_train, y_train)
+    return grid_search
+
+def guardar_modelo(modelo):
+    os.makedirs("files/models/", exist_ok=True)
+    with gzip.open("files/models/model.pkl.gz", "wb") as f:
+        pickle.dump(modelo, f)
+
+def calcular_metricas(modelo, X, y, nombre_dataset: str):
+    y_pred = modelo.predict(X)
+    metricas = {
+        "type": "metrics",
+        "dataset": nombre_dataset,
+        "precision": round(precision_score(y, y_pred), 4),
+        "balanced_accuracy": round(balanced_accuracy_score(y, y_pred), 4),
+        "recall": round(recall_score(y, y_pred), 4),
+        "f1_score": round(f1_score(y, y_pred), 4)
+    }
+    return y_pred, metricas
+
+
+def calcular_matriz_confusion(y_true, y_pred, nombre_dataset: str):
+    cm = confusion_matrix(y_true, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": nombre_dataset,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
+    }
+
+def guardar_registros(registros, path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        for item in registros:
+            f.write(json.dumps(item) + '\n')
+
+if __name__ == "__main__":
+    df_train, df_test = cargar_datos()
+
+    df_train = limpieza(df_train)
+    df_test = limpieza(df_test)
+
+    x_train, y_train = separar_datos(df_train)
+    x_test, y_test = separar_datos(df_test)
+
+    pipeline = hacer_pipeline(SVC())
+
+    modelo_optimizado = optimizar_modelo(pipeline, x_train, y_train)
+
+    guardar_modelo(modelo_optimizado)
+
+    y_pred_train, metricas_train = calcular_metricas(modelo_optimizado, x_train, y_train, "train")
+    y_pred_test, metricas_test = calcular_metricas(modelo_optimizado, x_test, y_test, "test")
+
+    cm_train = calcular_matriz_confusion(y_train, y_pred_train, "train")
+    cm_test = calcular_matriz_confusion(y_test, y_pred_test, "test")
+
+    registros = [metricas_train, metricas_test, cm_train, cm_test]
+    guardar_registros(registros, "files/output/metrics.json")
